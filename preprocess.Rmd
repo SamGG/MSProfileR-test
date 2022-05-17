@@ -1,0 +1,451 @@
+---
+title: "PreProcessing"
+author: "MSProfileR"
+output:
+  html_document:
+    code_folding: hide
+    toc_float: yes
+  pdf_document: default
+params:
+  spectraPath: data/cullex_monique
+  annotationFile: data/Mosquitoes/annotations_mosquitoes_ref.csv
+  TIC: PQN
+  SNR: '4'
+  RData: a_output/a_preprocess.RData
+  verbose: '0'
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# MODULE I : DATA LOADING
+##############################################################################################################################
+# Load Spectra, Retrieve Annotations
+
+All spectra files are in the `r params$spectraPath` folder. All spectra are processed together.
+
+```{r load}
+library(MSProfileR)
+library(MALDIquantForeign)
+library(MALDIquant)
+library(MALDIrppa)
+
+## Load spectra 
+
+spectra_raw <- import(params$spectraPath, verbose=FALSE)
+create.df.spectra <- function(spectra){
+  
+  ### Creation of dataframe containing metaData of spectra -> The experimental informations
+  df.spectra <- data.frame(matrix(nrow = length(spectra), ncol = 5))
+  colnames(df.spectra) <- c("folder.name", "spectrum.name", "spot", "acquisition.date", "plate.name")
+  
+  for (i in 1:length(spectra)){
+    
+    folder.name <- spectra[[i]]@metaData$file
+    
+    if (.Platform$OS.type == "unix"){
+      
+      folder.name <- unlist(strsplit(x = folder.name, split = "/"))
+      
+    } else {
+      
+      folder.name <- unlist(strsplit(x = folder.name, split = "\\", fixed = T))
+      
+    }
+    
+    folder.name <- folder.name[length(folder.name) - 5]
+    df.spectra[i, "folder.name"] <- folder.name
+    
+    df.spectra[i, "spectrum.name"] <- spectra[[i]]@metaData$name
+    
+    df.spectra[i, "spot"] <- spectra[[i]]@metaData$spot
+    
+    df.spectra[i, "acquisition.date"] <- spectra[[i]]@metaData$acquisitionDate
+    
+    plate.name <- unlist(strsplit(x = spectra[[i]]@metaData$path, split = "\\", fixed = TRUE))
+    
+    #for (x in plate.name){
+    # if (grepl("sn", x) == TRUE | grepl("SN", x) == TRUE){
+    
+    #  df.spectra[i, "plate.name"] <- x
+    #}
+    #}
+    
+    if (length(plate.name) == 7 | length(plate.name) == 6){
+      df.spectra[i, "plate.name"] <- plate.name[length(plate.name) - 3]
+    } else {
+      df.spectra[i, "plate.name"] <- plate.name[length(plate.name) - 4]
+    }
+    
+    df.spectra[i, "sample.name"] <- spectra[[i]]@metaData$sampleName
+  }
+
+  df.spectra$body.part = "-"
+    
+  return(df.spectra)
+  
+  
+}
+
+length(spectra_raw)
+
+
+### Creation of dataframe containing metaData of spectra -> The experimental informations
+
+df.spectra <- create.df.spectra(spectra = spectra_raw)
+
+add.spectra.annotations <- function(annotationFile, df.spectra){
+  
+  annotations.df <- read.csv2(file = annotationFile, sep = ";", header = T, colClasses = "character")
+  
+  # df.spectra$sample.name <- NA
+  # df.spectra$body.part <- NA
+  
+  df.spectra$sample.name <- apply(df.spectra, 1, function(x){
+    sample.name.row <- which(annotations.df$Spot.position == x[3] & annotations.df$Plate.Name == x[5])
+    
+    if(length(sample.name.row) == 0){
+      # x[6] <- NA
+      #NA
+      x[2] ### spectrum name
+    } else {
+      if(!annotations.df[sample.name.row, "Sample.name"] == ""){
+        # x[6] <- annotations.df[sample.name.row, "Sample.name"]
+        annotations.df[sample.name.row, "Sample.name"]
+      } else {
+        # x[6] <- NA
+        #NA
+        x[2] ### spectrum name
+      }
+    }
+    
+    # if(!length(sample.name.row) == 0 & !annotations.df[sample.name.row, "Sample.name"] == ""){
+    #   
+    #   x[6] <- annotations.df[sample.name.row, "Sample.name"]
+    #   
+    # }
+  })
+  
+  df.spectra$body.part <- apply(df.spectra, 1, function(x){
+    body.part.row <- which(annotations.df$Spot.position == x[3] & annotations.df$Plate.Name == x[5])
+    
+    if(length(body.part.row) == 0){
+      
+      # x[7] <- NA
+      NA
+      
+    } else {
+      if (!annotations.df[body.part.row, "Body.part"] == ""){
+        # x[7] <- annotations.df[body.part.row, "Body.part"]
+        annotations.df[body.part.row, "Body.part"]
+      } else {
+        # x[7] <- NA
+        NA
+      }
+    }
+  })
+  
+  # for (i in 1:nrow(df.spectra)){
+  #   
+  #   row.number <- which(annotations.df$Spot.position == df.spectra[i, "spot"] & annotations.df$Plate.Name == df.spectra[i, "plate.name"])
+  #   
+  #   if(!length(row.number) == 0 & !annotations.df[row.number, "Sample.name"] == ""){
+  #   
+  #     df.spectra[i, "sample.name"] <- annotations.df[row.number, "Sample.name"]
+  #   
+  #   }
+  #   
+  #   if(!length(row.number) == 0 & !annotations.df[row.number, "Body.part"] == ""){
+  #   
+  #     df.spectra[i, "body.part"] <- annotations.df[row.number, "Body.part"]
+  #   
+  #   }
+  #   
+  #   
+  #   
+  #   
+  # }
+  
+  return(df.spectra)
+  
+}
+
+
+create_df_to_plot <- function(spectra, df.spectra = NULL){
+  
+  ### Build the long format dataframe which will contain all values necessary
+  ### to plot each spectrum with ggplot2.
+  ### This process is parallelized using (all - 1) cpu cores.
+  ### Returns dataframe.
+  
+  #cores.cluster <- detectCores() - 1
+  cl <- makeCluster(cpu.cores.nb)
+  clusterEvalQ(cl, .libPaths(file.path(getwd(), "library")))
+  registerDoParallel(cl)
+  
+  if (is.null(df.spectra)){
+    
+    
+    df.spectra.plot <- foreach(i = 1:length(spectra), .combine = rbind) %dopar% {
+      data.frame(spectrum.index = rep(i, length(spectra[[i]]@mass)) ,
+                 spectrum.name = rep(paste(spectra[[i]]@metaData$name, collapse = "-"), length(spectra[[i]]@mass)), 
+                 mass = spectra[[i]]@mass, 
+                 intensity = spectra[[i]]@intensity)
+      
+    }
+    
+    
+  } else {
+    
+    
+    df.spectra.plot <- foreach(i = 1:length(spectra), .combine = rbind) %dopar% {
+      data.frame(spectrum.index = rep(i, length(spectra[[i]]@mass)) ,
+                 spectrum.name = rep(paste(spectra[[i]]@metaData$name, collapse = "-"), length(spectra[[i]]@mass)), 
+                 mass = spectra[[i]]@mass, 
+                 intensity = spectra[[i]]@intensity,
+                 sample.name = rep(df.spectra[i, "sample.name"], length(spectra[[i]]@mass)),
+                 body.part = rep(df.spectra[i, "body.part"],length(spectra[[i]]@mass)))
+      
+    }
+    
+  }
+  
+  stopCluster(cl)
+  
+  return(df.spectra.plot)
+  
+  
+}
+
+
+library(knitr)
+library(ggplot2)
+``` 
+# MODULE II : PREPROCESSING
+################################################################################################################################
+
+# spectra trimming
+
+```{r, spectra trimming} 
+# search how to 7insert intervals (2-20 kda)
+
+spectra <- trim(spectra_raw)
+
+plot(spectra_raw[[47]], sub="")
+```
+
+
+# Conformity test
+
+```{r, conformity tests}
+## Conformity tests
+conformity_tab <- conformity_tests_results(spectra_raw)
+kable(conformity_tab)
+
+```
+
+# Spectra cleaning
+
+```{r, Negative intensity values are replaced by zeros}
+
+# Processing spectra ----
+
+spectra <- spectra_raw
+
+if (params$verbose == "2") {
+  plot_spectra_debug <- function() {
+    plot(spectra[[1]])  # Full spectrum in original scale
+    tmp <- spectra[[1]]
+    tmp@mass <- sqrt(tmp@mass)
+    # tmp@intensity <- log10((tmp@intensity))-1.5
+    plot(tmp, type = "l")  # Part of spectrum in log10 scale
+    plot(tmp, xlim = c(60, 80), type = "l")  # Part of spectrum in log10 scale
+  }
+}
+if (params$verbose == "2") plot_spectra_debug()
+
+## transform intensities
+spectra <- get.transformed.spectra(spectra_raw) # spectra cleaning###############
+
+if (params$verbose == "2") plot_spectra_debug()
+
+gc()
+```
+
+
+# Quality control 
+
+```{r, spectra screening (threshold)}
+
+## Control Quality of Spectra
+
+screenResults <- screenSpectra(spectra, estimator = "MAD", threshold = 0.9)
+
+plot_screening.results(df.spectra = df.spectra, sc.results = screenResults)
+```
+
+# Spectra averaging
+
+```{r, spectra averaging}
+
+avgSpectra <- averageMassSpectra(spectra, labels=df.spectra$sample.name,
+ method="mean")
+length(avgSpectra)
+# View(avgSpectra)
+
+```
+
+
+
+## Peak detection
+
+The spectra are continuous curves representing peaks. The center and the intensity of each peak need to be determined to simplify the information. For each spectrum this detection results in a peak list.
+
+```{r, peak detection with number (without graphic)}
+
+peaks <- get.peaks(avgSpectra, as.numeric(params$SNR))
+
+plot(avgSpectra[[16]], xlim=c(4000, 5000), ylim=c(0, 0.002))
+plot(peaks[[16]], col="red", pch=4)
+
+length(peaks)
+sapply(peaks, length)
+hist(sapply(peaks, length))
+```
+
+# Spectra re-aligning
+
+Because spectra are not perfectly aligned (calibration dispersion?), the most intense peaks in common through the data set are selected and used to realign the mass and the spectra.
+
+```{r, spectra aligning}
+
+# Got peaks for each spectrum
+# Search for reference peaks across all spectra
+p_ref <- referencePeaks(peaks, method = "strict", minFrequency = 0.3, tolerance = 2500e-6)
+p_ref
+
+# Define functions to realign each spectra to the reference peaks
+w_funs <- determineWarpingFunctions(peaks, p_ref, tolerance = 2500e-6, method = "linear", allowNoMatches = TRUE)
+# initially tol=4000ppm
+# QC
+plot(attr(w_funs, "nmatch"), type = "p", las = 1, ylab = "# matched peaks", xlab = "spectrum id", main = "Count of peaks matched to reference", ylim = c(0, length(p_ref)*1.1), cex = 0.8)
+abline(h = length(p_ref) * c(1, 0.9, 0.8), lw = 2, col = c("#44EE4488", "#EE884488", "#EE444488"))
+legend("bottomright", sprintf("%3d%%", c(1, 0.9, 0.8)*100), lwd = 3, col = c("#44EE4488", "#EE884488", "#EE444488"), xjust = 1, title = "% match")
+
+# Align peak lists
+p_aligned <- warpMassPeaks(peaks, w_funs, emptyNoMatches = TRUE)
+
+```
+
+
+```{r, spectra binnig}
+p_aligned_bin <- binPeaks(p_aligned, tolerance=0.002)
+p_aligned_bin_filt <- filterPeaks(p_aligned_bin, minFrequency=0) ###########" freq 0 à corriger
+
+featureMatrix <- intensityMatrix(p_aligned_bin_filt, avgSpectra)
+head(featureMatrix[, 1:6])
+dim(featureMatrix)
+
+image(sqrt(t(featureMatrix)), col = grey.colors(64), xaxt = "n", yaxt = "n", xlab = "m/z", ylab = "samples", mgp = c(0, 0, 0))
+m.mass <- as.numeric(colnames(featureMatrix))
+
+```
+
+
+
+
+
+# Spectra clustring (heatmap and dendrogram)
+
+Usually a heatmap is built to get an overview of the detected and aligned peaks. Peaks frequently present in spectra are kept, others are filtered out.
+
+```{r, spectra clustring}
+# Create a heatmap view of peak lists ----
+
+if (FALSE) {
+# Peaks that enter the same bin are matched and assigned an average mass
+# try relaxed? p_binned <- binPeaks(p_aligned, method = "relaxed", tolerance = 1800e-6)
+# p_binned <- binPeaks(p_aligned, method = "strict", tolerance = 1800e-6)
+p_binned <- binPeaks(p_aligned, method = "strict", tolerance = 1000e-6)
+# Lionel looks for tol = 1000ppm
+
+# Frequent peaks are kept
+p_filtered <- filterPeaks(p_binned, minFrequency = 0.5)
+
+# A matrix of intensity can be extracted
+
+s_aligned <- warpMassSpectra(spectra, w_funs, emptyNoMatches = TRUE)
+p_matrix <- intensityMatrix(p_filtered, s_aligned)
+
+dim(p_matrix)
+kable(p_matrix[]) ############### 1:20, 1:7 inside the quote
+round(prop.table(table(is.na(p_matrix))) * 100, 2)
+
+# The heatmap of common peaks across spectra
+# Each row is a sample. Each column is a peak. The intensity is encoded by the grey level, black meaning very intense. White corresponds to an undetected peak.
+image(sqrt(t(p_matrix)), col = grey.colors(64), xaxt = "n", yaxt = "n", xlab = "m/z", ylab = "samples", mgp = c(0, 0, 0))
+m.mass <- as.numeric(colnames(p_matrix))
+# Each peak mass of the columns
+m.mass
+
+
+
+distanceMatrix <- dist(featureMatrix, method = "euclidean")
+hClust_row <- hclust(distanceMatrix, method = "complete")
+
+plot(hClust_row, hang = -1)
+
+
+
+distanceMatrix <- dist(t(featureMatrix), method = "euclidean")
+hClust_col <- hclust(distanceMatrix, method = "complete")
+
+image(sqrt(t(featureMatrix[hClust_row$order, hClust_col$order])), col = grey.colors(64), xaxt = "n", yaxt = "n", xlab = "m/z", ylab = "samples", mgp = c(0, 0, 0))
+image(sqrt(t(featureMatrix[hClust_row$order, ])), col = grey.colors(64), xaxt = "n", yaxt = "n", xlab = "m/z", ylab = "samples", mgp = c(0, 0, 0))
+
+}
+
+
+# install.packages("pheatmap")
+
+avgSpectra_sample = data.frame(
+  sample.name = sapply(avgSpectra, function(s) s@metaData$sampleName)
+)
+
+df.tmp = unique(df.spectra[, c("folder.name", "sample.name", "body.part")])
+
+df.avgSpectra = merge(avgSpectra_sample, df.tmp, sort = FALSE)
+
+
+rownames(featureMatrix) <- df.avgSpectra$sample.name
+rownames(df.avgSpectra) <- df.avgSpectra$sample.name
+
+df.avgSpectra$body.part = substr(df.avgSpectra$sample.name, 1, 2)
+
+dim(featureMatrix)
+
+pheatmap::pheatmap(
+  sqrt(featureMatrix), cluster_rows = TRUE, cluster_cols = FALSE, show_rownames = FALSE, show_colnames = FALSE, annotation_row = df.avgSpectra[, "body.part", drop = FALSE]
+)
+
+
+```
+
+
+## Snapshot
+
+```{r echo=TRUE, eval=FALSE}
+# save(merge_final, annot_final, spectra, s, p, p_ref, # annot, clinics, 
+#      p_aligned, p_binned, p_filtered, p_matrix,
+#      s_aligned, new_mz_nb, mz_new, mat_aligned, mat_unaligned, file = params$RData)
+output_dir <- dirname(params$RData)
+if (!dir.exists(output_dir)) dir.create(output_dir)
+save(
+  params,
+  spectra, p_ref, 
+  p_aligned, p_binned, p_filtered, p_matrix,
+  s_aligned, file = params$RData
+)
+```
