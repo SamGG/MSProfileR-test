@@ -7,7 +7,7 @@ output:
     toc_float: yes
   pdf_document: default
 params:
-  spectraPath: data/cullex_monique
+  spectraPath: ../MSProfileR-test/data/cullex_monique
   annotationFile: data/Mosquitoes/annotations_mosquitoes_ref.csv
   TIC: PQN
   SNR: '4'
@@ -35,220 +35,56 @@ library(MALDIrppa)
 ## Load spectra 
 
 spectra_raw <- import(params$spectraPath, verbose=FALSE)
-create.df.spectra <- function(spectra){
-  
-  ### Creation of dataframe containing metaData of spectra -> The experimental informations
-  df.spectra <- data.frame(matrix(nrow = length(spectra), ncol = 5))
-  colnames(df.spectra) <- c("folder.name", "spectrum.name", "spot", "acquisition.date", "plate.name")
-  
-  for (i in 1:length(spectra)){
-    
-    folder.name <- spectra[[i]]@metaData$file
-    
-    if (.Platform$OS.type == "unix"){
-      
-      folder.name <- unlist(strsplit(x = folder.name, split = "/"))
-      
-    } else {
-      
-      folder.name <- unlist(strsplit(x = folder.name, split = "\\", fixed = T))
-      
-    }
-    
-    folder.name <- folder.name[length(folder.name) - 5]
-    df.spectra[i, "folder.name"] <- folder.name
-    
-    df.spectra[i, "spectrum.name"] <- spectra[[i]]@metaData$name
-    
-    df.spectra[i, "spot"] <- spectra[[i]]@metaData$spot
-    
-    df.spectra[i, "acquisition.date"] <- spectra[[i]]@metaData$acquisitionDate
-    
-    plate.name <- unlist(strsplit(x = spectra[[i]]@metaData$path, split = "\\", fixed = TRUE))
-    
-    #for (x in plate.name){
-    # if (grepl("sn", x) == TRUE | grepl("SN", x) == TRUE){
-    
-    #  df.spectra[i, "plate.name"] <- x
-    #}
-    #}
-    
-    if (length(plate.name) == 7 | length(plate.name) == 6){
-      df.spectra[i, "plate.name"] <- plate.name[length(plate.name) - 3]
-    } else {
-      df.spectra[i, "plate.name"] <- plate.name[length(plate.name) - 4]
-    }
-    
-    df.spectra[i, "sample.name"] <- spectra[[i]]@metaData$sampleName
-  }
-
-  df.spectra$body.part = "-"
-    
-  return(df.spectra)
-  
-  
-}
 
 length(spectra_raw)
 
 
 ### Creation of dataframe containing metaData of spectra -> The experimental informations
 
-df.spectra <- create.df.spectra(spectra = spectra_raw)
-
-add.spectra.annotations <- function(annotationFile, df.spectra){
-  
-  annotations.df <- read.csv2(file = annotationFile, sep = ";", header = T, colClasses = "character")
-  
-  # df.spectra$sample.name <- NA
-  # df.spectra$body.part <- NA
-  
-  df.spectra$sample.name <- apply(df.spectra, 1, function(x){
-    sample.name.row <- which(annotations.df$Spot.position == x[3] & annotations.df$Plate.Name == x[5])
-    
-    if(length(sample.name.row) == 0){
-      # x[6] <- NA
-      #NA
-      x[2] ### spectrum name
-    } else {
-      if(!annotations.df[sample.name.row, "Sample.name"] == ""){
-        # x[6] <- annotations.df[sample.name.row, "Sample.name"]
-        annotations.df[sample.name.row, "Sample.name"]
-      } else {
-        # x[6] <- NA
-        #NA
-        x[2] ### spectrum name
-      }
-    }
-    
-    # if(!length(sample.name.row) == 0 & !annotations.df[sample.name.row, "Sample.name"] == ""){
-    #   
-    #   x[6] <- annotations.df[sample.name.row, "Sample.name"]
-    #   
-    # }
-  })
-  
-  df.spectra$body.part <- apply(df.spectra, 1, function(x){
-    body.part.row <- which(annotations.df$Spot.position == x[3] & annotations.df$Plate.Name == x[5])
-    
-    if(length(body.part.row) == 0){
-      
-      # x[7] <- NA
-      NA
-      
-    } else {
-      if (!annotations.df[body.part.row, "Body.part"] == ""){
-        # x[7] <- annotations.df[body.part.row, "Body.part"]
-        annotations.df[body.part.row, "Body.part"]
-      } else {
-        # x[7] <- NA
-        NA
-      }
-    }
-  })
-  
-  # for (i in 1:nrow(df.spectra)){
-  #   
-  #   row.number <- which(annotations.df$Spot.position == df.spectra[i, "spot"] & annotations.df$Plate.Name == df.spectra[i, "plate.name"])
-  #   
-  #   if(!length(row.number) == 0 & !annotations.df[row.number, "Sample.name"] == ""){
-  #   
-  #     df.spectra[i, "sample.name"] <- annotations.df[row.number, "Sample.name"]
-  #   
-  #   }
-  #   
-  #   if(!length(row.number) == 0 & !annotations.df[row.number, "Body.part"] == ""){
-  #   
-  #     df.spectra[i, "body.part"] <- annotations.df[row.number, "Body.part"]
-  #   
-  #   }
-  #   
-  #   
-  #   
-  #   
-  # }
-  
-  return(df.spectra)
-  
-}
-
-
-create_df_to_plot <- function(spectra, df.spectra = NULL){
-  
-  ### Build the long format dataframe which will contain all values necessary
-  ### to plot each spectrum with ggplot2.
-  ### This process is parallelized using (all - 1) cpu cores.
-  ### Returns dataframe.
-  
-  #cores.cluster <- detectCores() - 1
-  cl <- makeCluster(cpu.cores.nb)
-  clusterEvalQ(cl, .libPaths(file.path(getwd(), "library")))
-  registerDoParallel(cl)
-  
-  if (is.null(df.spectra)){
-    
-    
-    df.spectra.plot <- foreach(i = 1:length(spectra), .combine = rbind) %dopar% {
-      data.frame(spectrum.index = rep(i, length(spectra[[i]]@mass)) ,
-                 spectrum.name = rep(paste(spectra[[i]]@metaData$name, collapse = "-"), length(spectra[[i]]@mass)), 
-                 mass = spectra[[i]]@mass, 
-                 intensity = spectra[[i]]@intensity)
-      
-    }
-    
-    
-  } else {
-    
-    
-    df.spectra.plot <- foreach(i = 1:length(spectra), .combine = rbind) %dopar% {
-      data.frame(spectrum.index = rep(i, length(spectra[[i]]@mass)) ,
-                 spectrum.name = rep(paste(spectra[[i]]@metaData$name, collapse = "-"), length(spectra[[i]]@mass)), 
-                 mass = spectra[[i]]@mass, 
-                 intensity = spectra[[i]]@intensity,
-                 sample.name = rep(df.spectra[i, "sample.name"], length(spectra[[i]]@mass)),
-                 body.part = rep(df.spectra[i, "body.part"],length(spectra[[i]]@mass)))
-      
-    }
-    
-  }
-  
-  stopCluster(cl)
-  
-  return(df.spectra.plot)
-  
-  
-}
-
+df.spectra <- create_df_spectra(spectra = spectra_raw)
 
 library(knitr)
 library(ggplot2)
 ``` 
+
 # MODULE II : PREPROCESSING
 ################################################################################################################################
 
 # spectra trimming
 
-```{r, spectra trimming} 
+```{r spectra trimming} 
 # search how to 7insert intervals (2-20 kda)
+conformity_tests_results(spectra_raw)
 
+spectra <- trim(spectra_raw)
+conformity_tests_results(spectra)
+
+# test trimming
+spectra <- trim(spectra_raw, c(2500, 9000))
+conformity_tests_results(spectra)
+
+range(sapply(spectra, function(s) min(mass(s))))
+range(sapply(spectra, function(s) max(mass(s))))
+
+# back to full data
 spectra <- trim(spectra_raw)
 
 plot(spectra_raw[[47]], sub="")
+plot(spectra[[47]], sub="")
 ```
 
 
 # Conformity test
 
-```{r, conformity tests}
+```{r conformity tests}
 ## Conformity tests
-conformity_tab <- conformity_tests_results(spectra_raw)
+conformity_tab <- conformity_tests_results(spectra)
 kable(conformity_tab)
-
 ```
 
 # Spectra cleaning
 
-```{r, Negative intensity values are replaced by zeros}
+```{r Negative intensity values are replaced by zeros}
 
 # Processing spectra ----
 
